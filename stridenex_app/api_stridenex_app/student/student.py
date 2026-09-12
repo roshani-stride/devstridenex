@@ -229,7 +229,7 @@ def get_student(name=None, first_name=None, last_name=None, email_id=None, colle
         where_clause = " AND ".join(conditions)
 
         sql = f"""
-            SELECT name, first_name, last_name, email_id, college
+            SELECT name, first_name, last_name, email_id, college, other_college
             FROM `tabStudent`
             WHERE docstatus = 1
             {f'AND {where_clause}' if where_clause else ''}
@@ -239,6 +239,10 @@ def get_student(name=None, first_name=None, last_name=None, email_id=None, colle
 
         if not result:
             return gen_response(404, "No student found.")
+
+        for row in result:
+            if (not row.get("college") or str(row.get("college")).strip().lower() == "other") and row.get("other_college"):
+                row["college"] = row.get("other_college")
 
         return gen_response(200, "Student fetched successfully.", result)
 
@@ -271,6 +275,29 @@ def get_student_by_email(email_id):
 
         doc = frappe.get_doc("Student", name)
         data = doc.as_dict()
+
+        if (not data.get("college") or str(data.get("college")).strip().lower() == "other") and data.get("other_college"):
+            data["college"] = data.get("other_college")
+
+        if "courses_type" in data:
+            ct_val = data.get("courses_type")
+            if isinstance(ct_val, list):
+                types = []
+                for row in ct_val:
+                    if isinstance(row, dict):
+                        val = row.get("course_type")
+                        if val:
+                            types.append(str(val))
+                    elif row:
+                        types.append(str(row))
+                course_type_str = ", ".join(types) if types else ""
+            elif ct_val:
+                course_type_str = str(ct_val)
+            else:
+                course_type_str = ""
+
+            data["courses_type"] = course_type_str
+            data["course_type"] = course_type_str
 
         # Parent-level image/attach fields — update these fieldnames to match your Student doctype
         parent_image_fields = ["student_image", "profile_picture"]
@@ -349,7 +376,7 @@ def update_student(name=None, email_id=None):
             "certificates": [
                 "certificate_name", "issuing_organization",
                 "issue_date", "expiry_date", "credential_id",
-                "credential_url", "certificate_file"
+                "credential_url", "certificate_file","mode"
             ],
             "internship": [
                 "company_name", "job_title", "employment_type",

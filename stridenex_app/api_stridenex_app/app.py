@@ -13,6 +13,15 @@ from stridenex_app.api_stridenex_app.app_utils import (
 
 import string
 from frappe.utils.pdf import get_pdf
+import random
+from urllib.parse import quote
+
+import frappe
+from frappe import _
+from frappe.utils import nowdate,formatdate
+from frappe.utils.pdf import get_pdf
+
+
 
 
 @frappe.whitelist(allow_guest=True)
@@ -82,6 +91,25 @@ def signup():
 
         # Assign role
         user.add_roles(frappe_role)
+
+        # Add to Email Group if promotional news is accepted
+        allow_promotional_news = data.get("allow_promotional_news") or data.get("allow_promotion_new") or data.get("Allow promotioan new")
+        if allow_promotional_news in [1, "1", True, "true", "True"]:
+            group_title = selected_role.capitalize()
+            
+            if not frappe.db.exists("Email Group", group_title):
+                frappe.get_doc({
+                    "doctype": "Email Group",
+                    "title": group_title
+                }).insert(ignore_permissions=True)
+                
+            if not frappe.db.exists("Email Group Member", {"email_group": group_title, "email": email}):
+                frappe.get_doc({
+                    "doctype": "Email Group Member",
+                    "email_group": group_title,
+                    "email": email,
+                    "unsubscribed": 0
+                }).insert(ignore_permissions=True)
 
         frappe.db.commit()
 
@@ -166,8 +194,175 @@ def logout():
         return gen_response(200, "Logged out successfully.")
     except Exception as e:
         return exception_handel(e)
-    
-        
+
+
+
+@frappe.whitelist(allow_guest=True)
+def forgot_password():
+
+    if frappe.request.method != "POST":
+        return gen_response(
+            400,
+            "Only POST allowed",
+            {"success": False}
+        )
+
+    try:
+        data = frappe.request.get_json() or {}
+
+        email = data.get("email")
+
+        if not email:
+            return gen_response(
+                400,
+                "Email is required",
+                {"success": False}
+            )
+
+        # -----------------------------------
+        # CHECK USER
+        # -----------------------------------
+
+        user = frappe.db.get_value(
+            "User",
+            {"email": email},
+            ["name", "enabled", "first_name"],
+            as_dict=True
+        )
+
+        if not user:
+            return gen_response(
+                404,
+                "User not found",
+                {"success": False}
+            )
+
+        if not user.enabled:
+            return gen_response(
+                400,
+                "User account is disabled",
+                {"success": False}
+            )
+
+        # -----------------------------------
+        # GENERATE RESET KEY
+        # -----------------------------------
+
+        reset_key = frappe.generate_hash(length=32)
+
+        # Frappe stores the SHA256 hash,
+        # not the original key
+        hashed_key = frappe.utils.sha256_hash(reset_key)
+
+        # -----------------------------------
+        # SAVE RESET KEY
+        # -----------------------------------
+
+        frappe.db.set_value(
+            "User",
+            user.name,
+            {
+                "reset_password_key": hashed_key,
+                "last_reset_password_key_generated_on": frappe.utils.now_datetime()
+            }
+        )
+
+        frappe.db.commit()
+
+        # -----------------------------------
+        # CREATE RESET LINK
+        # -----------------------------------
+
+        reset_url = (
+            frappe.utils.get_url()
+            + "/update-password?key="
+            + reset_key
+        )
+
+        # -----------------------------------
+        # SEND EMAIL
+        # -----------------------------------
+
+        frappe.sendmail(
+            recipients=[email],
+            subject="Reset Your Stridenex Password",
+            message=f"""
+                <div style="font-family: Arial, sans-serif;">
+
+                    <h2>Password Reset</h2>
+
+                    <p>
+                        Hello {user.first_name or ''},
+                    </p>
+
+                    <p>
+                        We received a request to reset your
+                        Stridenex account password.
+                    </p>
+
+                    <p>
+                        Click the button below to create a new password:
+                    </p>
+
+                    <p>
+                        <a href="{reset_url}"
+                           style="
+                               display:inline-block;
+                               padding:12px 24px;
+                               background:#1677ff;
+                               color:#ffffff;
+                               text-decoration:none;
+                               border-radius:6px;
+                               font-weight:bold;
+                           ">
+                            Reset Password
+                        </a>
+                    </p>
+
+                    <p>
+                        Or copy and paste this link into your browser:
+                    </p>
+
+                    <p>
+                        <a href="{reset_url}">
+                            {reset_url}
+                        </a>
+                    </p>
+
+                    <p>
+                        If you did not request a password reset,
+                        please ignore this email.
+                    </p>
+
+                </div>
+            """
+        )
+
+        return gen_response(
+            200,
+            "Password reset link sent successfully",
+            {
+                "success": True
+            }
+        )
+
+    except Exception as e:
+
+        frappe.log_error(
+            frappe.get_traceback(),
+            "Forgot Password Error"
+        )
+
+        return gen_response(
+            500,
+            str(e),
+            {
+                "success": False
+            }
+        )
+
+
+
 @frappe.whitelist(allow_guest=True)
 def send_mobile_otp(mobile_no=None):
 
@@ -831,3 +1026,160 @@ def get_offer_letter(student, offer_type, name, template):
     frappe.local.response.filename = f"{doc.first_name}_{doc.last_name}_Offer_Letter.pdf"
     frappe.local.response.filecontent = pdf
     frappe.local.response.type = "download"   
+
+
+
+
+# apps/your_app/your_app/api.py
+#
+# Frappe API endpoint for generating the StrideNEX certificate.
+#
+# Setup:
+#   1. Put certificate_template.html inside:
+#        your_app/your_app/templates/certificate_template.html
+#   2. Put this file inside:
+#        your_app/your_app/api.py
+#   3. Call it from the browser / Postman / your frontend as:
+#
+#        GET  /api/method/your_app.api.get_certificate?student_name=Rahul%20Sharma&assessment_name=Pathfinder%20Assessment
+#        POST /api/method/your_app.api.get_certificate   (with JSON body)
+#
+#      Response is raw HTML (renders as a webpage) unless as_pdf=1 is passed,
+#      in which case a PDF is streamed back for download.
+
+
+
+
+@frappe.whitelist(allow_guest=True)
+def get_certificate(
+    student_name=None,
+    assessment_name=None,
+    sr_no=None,
+    issued_date=None
+):
+    if not student_name:
+        frappe.throw(_("Student name is required"))
+
+    if not assessment_name:
+        frappe.throw(_("Assessment name is required"))
+
+    certificate_sr_no = sr_no or _generate_sr_no()
+
+    context = {
+        "student_name": student_name,
+        "assessment_name": assessment_name,
+        "sr_no": certificate_sr_no,
+        "issued_date": issued_date or formatdate(
+            nowdate(),
+            "dd MMM yyyy"
+        ),
+        "qr_code_url": _get_qr_code_url(certificate_sr_no),
+    }
+
+    # Render certificate template
+    html = frappe.render_template(
+        "stridenex_app/templates/certificate_template.html",
+        context
+    )
+
+    pdf = get_pdf(
+    html,
+    {
+        "page-size": "A4",
+        "orientation": "Landscape",
+        "margin-top": "0mm",
+        "margin-bottom": "0mm",
+        "margin-left": "0mm",
+        "margin-right": "0mm",
+        "print-media-type": True,
+        "enable-local-file-access": True,
+    }
+        )       
+    
+    frappe.local.response.filename = (
+        f"certificate-{certificate_sr_no}.pdf"
+    )
+
+    frappe.local.response.filecontent = pdf
+    
+    frappe.local.response.type = "download"
+
+
+def _generate_sr_no():
+    return random.randint(100000, 999999)
+
+def _get_qr_code_url(data):
+    """Generates a QR code pointing to a verification page (or encoding the sr_no).
+    Uses a free QR generation API — swap for a local qrcode-lib generated image
+    if you don't want an external call."""
+    verification_url = f"{frappe.utils.get_url()}/api/method/stridenex_app.api_stridenex_app.app.get_certificate"
+    return f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={quote(verification_url)}"
+
+
+
+
+# your_app/api.py
+
+import random
+import frappe
+from frappe import _
+from frappe.utils import now_datetime, add_to_date
+import random
+import frappe
+from frappe import _
+
+OTP_EXPIRY_MINUTES = 5
+WHATSAPP_ACCOUNT = "Stridenex"  # your WhatsApp Account name in Frappe
+
+
+@frappe.whitelist(allow_guest=True)
+def send_otp(mobile_no):
+    """Generate OTP, store it, send via plain WhatsApp text message."""
+    if not mobile_no:
+        frappe.throw(_("Mobile number is required"))
+
+    otp = str(random.randint(100000, 999999))
+
+    # store OTP against the mobile number with expiry
+    frappe.cache().set_value(
+        f"whatsapp_otp:{mobile_no}",
+        otp,
+        expires_in_sec=OTP_EXPIRY_MINUTES * 60,
+    )
+
+    message_text = (
+        f"Your verification code is {otp}. "
+        f"It will expire in {OTP_EXPIRY_MINUTES} minutes. "
+        f"Do not share this code with anyone."
+    )
+
+    frappe.get_doc({
+        "doctype": "WhatsApp Message",
+        "to": mobile_no,
+        "type": "Outgoing",
+        "message_type": "Manual",   # plain text, not "Template"
+        "content_type": "text",
+        "message": message_text,
+        "whatsapp_account": WHATSAPP_ACCOUNT,
+    }).insert(ignore_permissions=True)
+
+    return {"status": "sent", "mobile_no": mobile_no}
+
+
+@frappe.whitelist(allow_guest=True)
+def verify_otp(mobile_no, otp):
+    """Compare submitted OTP with cached one."""
+    if not mobile_no or not otp:
+        frappe.throw(_("Mobile number and OTP are required"))
+
+    cached_otp = frappe.cache().get_value(f"whatsapp_otp:{mobile_no}")
+
+    if not cached_otp:
+        return {"verified": False, "reason": "expired_or_not_sent"}
+
+    if str(cached_otp) != str(otp):
+        return {"verified": False, "reason": "incorrect_otp"}
+
+    # success — clear it so it can't be reused
+    frappe.cache().delete_value(f"whatsapp_otp:{mobile_no}")
+    return {"verified": True}
